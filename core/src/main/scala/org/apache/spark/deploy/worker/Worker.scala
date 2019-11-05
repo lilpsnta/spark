@@ -20,47 +20,48 @@ package org.apache.spark.deploy.worker
 import java.io.File
 import java.io.IOException
 import java.text.SimpleDateFormat
-import java.util.{UUID, Date}
+import java.util.{ UUID, Date }
 
 import scala.collection.JavaConversions._
-import scala.collection.mutable.{HashMap, HashSet}
+import scala.collection.mutable.{ HashMap, HashSet }
 import scala.concurrent.duration._
 import scala.language.postfixOps
 import scala.util.Random
 
 import akka.actor._
-import akka.remote.{DisassociatedEvent, RemotingLifecycleEvent}
+import akka.remote.{ DisassociatedEvent, RemotingLifecycleEvent }
 
-import org.apache.spark.{Logging, SecurityManager, SparkConf}
-import org.apache.spark.deploy.{Command, ExecutorDescription, ExecutorState}
+import org.apache.spark.{ Logging, SecurityManager, SparkConf }
+import org.apache.spark.deploy.{ Command, ExecutorDescription, ExecutorState }
 import org.apache.spark.deploy.DeployMessages._
-import org.apache.spark.deploy.master.{DriverState, Master}
+import org.apache.spark.deploy.master.{ DriverState, Master }
 import org.apache.spark.deploy.worker.ui.WorkerWebUI
 import org.apache.spark.metrics.MetricsSystem
-import org.apache.spark.util.{ActorLogReceive, AkkaUtils, SignalLogger, Utils}
+import org.apache.spark.util.{ ActorLogReceive, AkkaUtils, SignalLogger, Utils }
 
 /**
-  * @param masterAkkaUrls Each url should be a valid akka url.
-  */
+ * @param masterAkkaUrls Each url should be a valid akka url.
+ */
 private[spark] class Worker(
-    host: String,
-    port: Int,
-    webUiPort: Int,
-    cores: Int,
-    memory: Int,
-    masterAkkaUrls: Array[String],
-    actorSystemName: String,
-    actorName: String,
-    workDirPath: String = null,
-    val conf: SparkConf,
-    val securityMgr: SecurityManager)
+  host:            String,
+  port:            Int,
+  webUiPort:       Int,
+  cores:           Int,
+  memory:          Int,
+  masterAkkaUrls:  Array[String],
+  actorSystemName: String,
+  actorName:       String,
+  workDirPath:     String          = null,
+  val conf:        SparkConf,
+  val securityMgr: SecurityManager)
+  // worker 和 master 本身就是线程，所以想到通信发送消息
   extends Actor with ActorLogReceive with Logging {
   import context.dispatcher
-
+  
   Utils.checkHost(host, "Expected hostname")
-  assert (port > 0)
+  assert(port > 0)
 
-  def createDateFormat = new SimpleDateFormat("yyyyMMddHHmmss")  // For worker and executor IDs
+  def createDateFormat = new SimpleDateFormat("yyyyMMddHHmmss") // For worker and executor IDs
 
   // Send a heartbeat every (heartbeat timeout) / 4 milliseconds
   val HEARTBEAT_MILLIS = conf.getLong("spark.worker.timeout", 60) * 1000 / 4
@@ -92,7 +93,7 @@ private[spark] class Worker(
   var master: ActorSelection = null
   var masterAddress: Address = null
   var activeMasterUrl: String = ""
-  var activeMasterWebUiUrl : String = ""
+  var activeMasterWebUiUrl: String = ""
   val akkaUrl = AkkaUtils.address(
     AkkaUtils.protocol(context.system),
     actorSystemName,
@@ -144,11 +145,11 @@ private[spark] class Worker(
       // This sporadically fails - not sure why ... !workDir.exists() && !workDir.mkdirs()
       // So attempting to create and then check if directory was created or not.
       workDir.mkdirs()
-      if ( !workDir.exists() || !workDir.isDirectory) {
+      if (!workDir.exists() || !workDir.isDirectory) {
         logError("Failed to create work directory " + workDir)
         System.exit(1)
       }
-      assert (workDir.isDirectory)
+      assert(workDir.isDirectory)
     } catch {
       case e: Exception =>
         logError("Failed to create work directory " + workDir, e)
@@ -241,7 +242,8 @@ private[spark] class Worker(
         if (connectionAttemptCount == INITIAL_REGISTRATION_RETRIES) {
           registrationRetryTimer.foreach(_.cancel())
           registrationRetryTimer = Some {
-            context.system.scheduler.schedule(PROLONGED_REGISTRATION_RETRY_INTERVAL,
+            context.system.scheduler.schedule(
+              PROLONGED_REGISTRATION_RETRY_INTERVAL,
               PROLONGED_REGISTRATION_RETRY_INTERVAL, self, ReregisterWithMaster)
           }
         }
@@ -261,7 +263,8 @@ private[spark] class Worker(
         tryRegisterAllMasters()
         connectionAttemptCount = 0
         registrationRetryTimer = Some {
-          context.system.scheduler.schedule(INITIAL_REGISTRATION_RETRY_INTERVAL,
+          context.system.scheduler.schedule(
+            INITIAL_REGISTRATION_RETRY_INTERVAL,
             INITIAL_REGISTRATION_RETRY_INTERVAL, self, ReregisterWithMaster)
         }
       case Some(_) =>
@@ -278,7 +281,8 @@ private[spark] class Worker(
       context.system.scheduler.schedule(0 millis, HEARTBEAT_MILLIS millis, self, SendHeartbeat)
       if (CLEANUP_ENABLED) {
         logInfo(s"Worker cleanup enabled; old application directories will be deleted in: $workDir")
-        context.system.scheduler.schedule(CLEANUP_INTERVAL_MILLIS millis,
+        context.system.scheduler.schedule(
+          CLEANUP_INTERVAL_MILLIS millis,
           CLEANUP_INTERVAL_MILLIS millis, self, WorkDirCleanup)
       }
 
@@ -298,7 +302,7 @@ private[spark] class Worker(
           val appIdFromDir = dir.getName
           val isAppStillRunning = executors.values.map(_.appId).contains(appIdFromDir)
           dir.isDirectory && !isAppStillRunning &&
-          !Utils.doesDirectoryContainAnyNewFiles(dir, APP_DATA_RETENTION_SECS)
+            !Utils.doesDirectoryContainAnyNewFiles(dir, APP_DATA_RETENTION_SECS)
         }.foreach { dir =>
           logInfo(s"Removing directory: ${dir.getPath}")
           Utils.deleteRecursively(dir)
@@ -330,7 +334,9 @@ private[spark] class Worker(
     case ReconnectWorker(masterUrl) =>
       logInfo(s"Master with url $masterUrl requested this worker to reconnect.")
       registerWithMaster()
-
+      
+    // 启动executor ,核心逻辑
+    // master进行调度application时，分配好的worker后，会通过worker启动executor 
     case LaunchExecutor(masterUrl, appId, execId, appDesc, cores_, memory_) =>
       if (masterUrl != activeMasterUrl) {
         logWarning("Invalid Master (" + masterUrl + ") attempted to launch executor.")
@@ -339,6 +345,7 @@ private[spark] class Worker(
           logInfo("Asked to launch executor %s/%d for %s".format(appId, execId, appDesc.name))
 
           // Create the executor's working directory
+          // 创建工作目录 
           val executorDir = new File(workDir, appId + "/" + execId)
           if (!executorDir.mkdirs()) {
             throw new IOException("Failed to create directory " + executorDir)
@@ -353,6 +360,8 @@ private[spark] class Worker(
             }.toSeq
           }
           appDirectories(appId) = appLocalDirs
+          // 创建一个ExecutorRunner (内存走一个java线程)
+          // 应用id, execid, app的desc信息， 要求核数，内存，workerId, 主机，对外地址和端口，其它一些环境变量
           val manager = new ExecutorRunner(
             appId,
             execId,
@@ -371,23 +380,31 @@ private[spark] class Worker(
             appLocalDirs, ExecutorState.LOADING)
           executors(appId + "/" + execId) = manager
           manager.start()
+          // 更新已消耗的内存和cpu
           coresUsed += cores_
           memoryUsed += memory_
+          // 通知master executor 状态变化 
           master ! ExecutorStateChanged(appId, execId, manager.state, None, None)
         } catch {
           case e: Exception => {
             logError(s"Failed to launch executor $appId/$execId for ${appDesc.name}.", e)
             if (executors.contains(appId + "/" + execId)) {
+              // 如遇异步 ，kill executor 
               executors(appId + "/" + execId).kill()
               executors -= appId + "/" + execId
             }
+            // 通知master ,executor 启动失败
             master ! ExecutorStateChanged(appId, execId, ExecutorState.FAILED,
               Some(e.toString), None)
           }
         }
       }
 
+      
+    // ExecutorRunner 启动executor 进程后，会通知worker executor启动状态
+    // Worker在这里接收executor启动状态
     case ExecutorStateChanged(appId, execId, state, message, exitStatus) =>
+      // 接收Executor启动状态，转而通知Master 
       master ! ExecutorStateChanged(appId, execId, state, message, exitStatus)
       val fullId = appId + "/" + execId
       if (ExecutorState.isFinished(state)) {
@@ -398,6 +415,7 @@ private[spark] class Worker(
               exitStatus.map(" exitStatus " + _).getOrElse(""))
             executors -= fullId
             finishedExecutors(fullId) = executor
+            // executor 执行结束，释放cpu和内存资源
             coresUsed -= executor.cores
             memoryUsed -= executor.memory
           case None =>
@@ -422,8 +440,10 @@ private[spark] class Worker(
         }
       }
 
+    // 接收到master的  LaunchDriver消息后 启动Driver 
     case LaunchDriver(driverId, driverDesc) => {
       logInfo(s"Asked to launch driver $driverId")
+      // 创建一个DriverRunner 线程
       val driver = new DriverRunner(
         conf,
         driverId,
@@ -433,8 +453,9 @@ private[spark] class Worker(
         self,
         akkaUrl)
       drivers(driverId) = driver
+      // 启动线程
       driver.start()
-
+      // 更新worker的已经消耗的cpu和内存
       coresUsed += driverDesc.cores
       memoryUsed += driverDesc.mem
     }
@@ -449,6 +470,7 @@ private[spark] class Worker(
       }
     }
 
+    // Driver 启动完成后，会通知worker driver的启动状态
     case DriverStateChanged(driverId, state, exception) => {
       state match {
         case DriverState.ERROR =>
@@ -462,9 +484,15 @@ private[spark] class Worker(
         case _ =>
           logDebug(s"Driver $driverId changed state to $state")
       }
+      // 整体链路：  driver向master注册 - > master 分配worker ->worker启动driver 
+      //         -> DriverRunner线程 --> Driver进程启动完，通知worker 启动结果 --> Worker收到结果通知 Master 
+      //         -> Master 收到结果    
       master ! DriverStateChanged(driverId, state, exception)
+      // 调度成功的driver ,从本地缓存删除
       val driver = drivers.remove(driverId).get
+      // 记录已完成启动的driver
       finishedDrivers(driverId) = driver
+      // 更新worker已经消耗的内存和cpu资源
       memoryUsed -= driver.driverDesc.mem
       coresUsed -= driver.driverDesc.cores
     }
@@ -532,15 +560,15 @@ private[spark] object Worker extends Logging {
   }
 
   def startSystemAndActor(
-      host: String,
-      port: Int,
-      webUiPort: Int,
-      cores: Int,
-      memory: Int,
-      masterUrls: Array[String],
-      workDir: String,
-      workerNumber: Option[Int] = None,
-      conf: SparkConf = new SparkConf): (ActorSystem, Int) = {
+    host:         String,
+    port:         Int,
+    webUiPort:    Int,
+    cores:        Int,
+    memory:       Int,
+    masterUrls:   Array[String],
+    workDir:      String,
+    workerNumber: Option[Int]   = None,
+    conf:         SparkConf     = new SparkConf): (ActorSystem, Int) = {
 
     // The LocalSparkCluster runs multiple local sparkWorkerX actor systems
     val systemName = "sparkWorker" + workerNumber.map(_.toString).getOrElse("")
@@ -550,7 +578,7 @@ private[spark] object Worker extends Logging {
       conf = conf, securityManager = securityMgr)
     val masterAkkaUrls = masterUrls.map(Master.toAkkaUrl(_, AkkaUtils.protocol(actorSystem)))
     actorSystem.actorOf(Props(classOf[Worker], host, boundPort, webUiPort, cores, memory,
-      masterAkkaUrls, systemName, actorName,  workDir, conf, securityMgr), name = actorName)
+      masterAkkaUrls, systemName, actorName, workDir, conf, securityMgr), name = actorName)
     (actorSystem, boundPort)
   }
 
@@ -567,9 +595,9 @@ private[spark] object Worker extends Logging {
     val useNLC = "spark.ssl.useNodeLocalConf"
     if (isUseLocalNodeSSLConfig(cmd)) {
       val newJavaOpts = cmd.javaOpts
-          .filter(opt => !opt.startsWith(s"-D$prefix")) ++
-          conf.getAll.collect { case (key, value) if key.startsWith(prefix) => s"-D$key=$value" } :+
-          s"-D$useNLC=true"
+        .filter(opt => !opt.startsWith(s"-D$prefix")) ++
+        conf.getAll.collect { case (key, value) if key.startsWith(prefix) => s"-D$key=$value" } :+
+        s"-D$useNLC=true"
       cmd.copy(javaOpts = newJavaOpts)
     } else {
       cmd

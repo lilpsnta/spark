@@ -64,11 +64,13 @@ private[spark] class ExecutorRunner(
   var shutdownHook: Thread = null
 
   def start() {
+    // 启动一个线程
     workerThread = new Thread("ExecutorRunner for " + fullId) {
       override def run() { fetchAndRunExecutor() }
     }
     workerThread.start()
     // Shutdown hook that kills actors on shutdown.
+    // 设置线程关闭时回调
     shutdownHook = new Thread() {
       override def run() {
         killProcess(Some("Worker shutting down"))
@@ -124,6 +126,7 @@ private[spark] class ExecutorRunner(
   }
 
   /**
+   * 运行Executor 
    * Download and run the executor described in our ApplicationDescription
    */
   def fetchAndRunExecutor() {
@@ -149,7 +152,7 @@ private[spark] class ExecutorRunner(
       process = builder.start()
       val header = "Spark Executor Command: %s\n%s\n\n".format(
         command.mkString("\"", "\" \"", "\""), "=" * 40)
-
+      // 重定向Executor 的日志输出流到文件
       // Redirect its stdout and stderr to files
       val stdout = new File(executorDir, "stdout")
       stdoutAppender = FileAppender(process.getInputStream, stdout, conf)
@@ -160,18 +163,22 @@ private[spark] class ExecutorRunner(
 
       // Wait for it to exit; executor may exit with code 0 (when driver instructs it to shutdown)
       // or with nonzero exit code
+      // 启动进程 
       val exitCode = process.waitFor()
       state = ExecutorState.EXITED
       val message = "Command exited with code " + exitCode
+      // 通知worker executor启动状态
       worker ! ExecutorStateChanged(appId, execId, state, Some(message), Some(exitCode))
     } catch {
       case interrupted: InterruptedException => {
         logInfo("Runner thread for executor " + fullId + " interrupted")
+        // 线程中断，kill 掉进程 
         state = ExecutorState.KILLED
         killProcess(None)
       }
       case e: Exception => {
         logError("Error running executor", e)
+        // 未知异常，kill 掉进程
         state = ExecutorState.FAILED
         killProcess(Some(e.toString))
       }

@@ -36,6 +36,8 @@ import org.apache.spark.util.{Clock, SystemClock}
 /**
  * Manages the execution of one driver, including automatically restarting the driver on failure.
  * This is currently only used in standalone cluster deploy mode.
+ * 
+ * 管理driver的执行， 故障时自动重启driver ,只适用于satandalone模式
  */
 private[spark] class DriverRunner(
     val conf: SparkConf,
@@ -65,12 +67,15 @@ private[spark] class DriverRunner(
 
   /** Starts a thread to run and manage the driver. */
   def start() = {
+    // DriverRunner 其实是一个java线程
     new Thread("DriverRunner for " + driverId) {
       override def run() {
         try {
+          // 创建工作目录  
           val driverDir = createWorkingDirectory()
+          // 下载用户jar包到工作目录下
           val localJarFilename = downloadUserJar(driverDir)
-
+          
           def substituteVariables(argument: String): String = argument match {
             case "{{WORKER_URL}}" => workerUrl
             case "{{USER_JAR}}" => localJarFilename
@@ -80,12 +85,13 @@ private[spark] class DriverRunner(
           // TODO: If we add ability to submit multiple jars they should also be added here
           val builder = CommandUtils.buildProcessBuilder(driverDesc.command, driverDesc.mem,
             sparkHome.getAbsolutePath, substituteVariables)
+          // 真正启动driver 的代码 
           launchDriver(builder, driverDir, driverDesc.supervise)
         }
         catch {
           case e: Exception => finalException = Some(e)
         }
-
+        
         val state =
           if (killed) {
             DriverState.KILLED
@@ -97,9 +103,9 @@ private[spark] class DriverRunner(
               case _ => DriverState.FAILED
             }
           }
-
+          
         finalState = Some(state)
-
+        // driver 启动完成，向worker发送消息通知driver的启动的状态
         worker ! DriverStateChanged(driverId, state, finalException)
       }
     }.start()
@@ -133,6 +139,7 @@ private[spark] class DriverRunner(
 
     val jarPath = new Path(driverDesc.jarUrl)
 
+    // 获取hadoop 配置,hdfs文件系统
     val hadoopConf = SparkHadoopUtil.get.newConfiguration(conf)
     val jarFileSystem = jarPath.getFileSystem(hadoopConf)
 
@@ -140,7 +147,7 @@ private[spark] class DriverRunner(
     val jarFileName = jarPath.getName
     val localJarFile = new File(driverDir, jarFileName)
     val localJarFilename = localJarFile.getAbsolutePath
-
+    // 如果本地文件不存存，则进行拷贝
     if (!localJarFile.exists()) { // May already exist if running multiple workers on one node
       logInfo(s"Copying user jar $jarPath to $destPath")
       FileUtil.copy(jarFileSystem, jarPath, destPath, false, hadoopConf)
@@ -149,7 +156,6 @@ private[spark] class DriverRunner(
     if (!localJarFile.exists()) { // Verify copy succeeded
       throw new Exception(s"Did not see expected jar $jarFileName in $driverDir")
     }
-
     localJarFilename
   }
 
